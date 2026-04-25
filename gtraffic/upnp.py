@@ -29,6 +29,8 @@ SEARCH_TARGETS = (
     "ssdp:all",
 )
 
+DiscoveryMethod = str  # "multicast" | "unicast" | "auto"
+
 
 @dataclass
 class IgdService:
@@ -37,6 +39,24 @@ class IgdService:
     control_url: str
     service_type: str
     friendly_name: str = ""
+
+
+def list_local_ipv4() -> list[str]:
+    """Return a sorted list of local IPv4 addresses (best-effort, stdlib-only)."""
+    ips: set[str] = set()
+    try:
+        host = socket.gethostname()
+        for info in socket.getaddrinfo(host, None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    try:
+        ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    # Drop link-local autoconf if anything else exists
+    real = {ip for ip in ips if not ip.startswith("169.254.")}
+    return sorted(real or ips)
 
 
 def _local_ip_for(target: str) -> Optional[str]:
@@ -51,43 +71,98 @@ def _local_ip_for(target: str) -> Optional[str]:
         return None
 
 
-def discover_igd(target: Optional[str] = None, timeout: float = 3.0) -> IgdService:
+def discover_igd(
+    target: Optional[str] = None,
+    *,
+    interface_ip: Optional[str] = None,
+    method: DiscoveryMethod = "auto",
+    ssdp_port: int = SSDP_PORT,
+    timeout: float = 3.0,
+) -> IgdService:
     """Discover an IGD WANCommonInterfaceConfig service via SSDP M-SEARCH.
 
-    If `target` is given, the SSDP socket is bound to the local interface that
-    routes to it, and only responses whose LOCATION host matches `target` are
-    accepted. Without `target`, the first matching device on any interface is used.
+    Args:
+      target: gateway IP. If given, responses must come from / point to it.
+      interface_ip: local IPv4 to bind the SSDP socket to. If None and a target
+        is given, the OS-chosen route for the target is used.
+      method: "multicast" sends to 239.255.255.250; "unicast" sends directly to
+        `target`; "auto" tries multicast first then unicast (requires `target`).
+      ssdp_port: SSDP destination port (default 1900).
+      timeout: per-attempt timeout in seconds.
     """
-    bind_ip = _local_ip_for(target) if target else None
+    bind_ip = interface_ip or (_local_ip_for(target) if target else None)
 
-    for st in SEARCH_TARGETS:
-        location = _ssdp_search(st, target=target, bind_ip=bind_ip, timeout=timeout)
-        if location:
-            return _parse_device_description(location)
-    raise RuntimeError(
-        "No UPnP IGD WANCommonInterfaceConfig found"
-        + (f" matching host {target}" if target else "")
-    )
+    if method == "unicast" and not target:
+        raise ValueError("--method unicast requires a target host")
+
+    methods: list[DiscoveryMethod]
+    if method == "auto":
+        methods = ["multicast", "unicast"] if target else ["multicast"]
+    else:
+        methods = [method]
+
+    last_err: Optional[Exception] = None
+    for m in methods:
+        for st in SEARCH_TARGETS:
+            try:
+                location = _ssdp_search(
+                    st,
+                    target=target,
+                    bind_ip=bind_ip,
+                    ssdp_port=ssdp_port,
+                    method=m,
+                    timeout=timeout,
+                )
+            except OSError as e:
+                last_err = e
+                continue
+            if location:
+                return _parse_device_description(location)
+    msg = "No UPnP IGD WANCommonInterfaceConfig found"
+    if target:
+        msg += f" matching host {target}"
+    if last_err:
+        msg += f" (last error: {last_err})"
+    raise RuntimeError(msg)
+
+
+def from_description_url(url: str) -> IgdService:
+    """Skip SSDP and build an IgdService directly from a known device-description URL."""
+    return _parse_device_description(url)
 
 
 def _ssdp_search(
     st: str,
+    *,
     target: Optional[str],
     bind_ip: Optional[str],
+    ssdp_port: int,
+    method: DiscoveryMethod,
     timeout: float,
 ) -> Optional[str]:
+    if method == "unicast":
+        if not target:
+            return None
+        dest_host = target
+    else:
+        dest_host = SSDP_ADDR
+
     msg = (
         "M-SEARCH * HTTP/1.1\r\n"
-        f"HOST: {SSDP_ADDR}:{SSDP_PORT}\r\n"
+        f"HOST: {dest_host}:{ssdp_port}\r\n"
         'MAN: "ssdp:discover"\r\n'
         "MX: 2\r\n"
         f"ST: {st}\r\n\r\n"
     ).encode("ascii")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    if method == "multicast":
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        if bind_ip:
+            sock.setsockopt(
+                socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(bind_ip)
+            )
     if bind_ip:
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(bind_ip))
         try:
             sock.bind((bind_ip, 0))
         except OSError:
@@ -96,7 +171,7 @@ def _ssdp_search(
         sock.bind(("", 0))
 
     try:
-        sock.sendto(msg, (SSDP_ADDR, SSDP_PORT))
+        sock.sendto(msg, (dest_host, ssdp_port))
         deadline = time.time() + timeout
         while time.time() < deadline:
             sock.settimeout(max(0.05, deadline - time.time()))
@@ -182,20 +257,3 @@ def diff_counter(prev: int, cur: int, mod: int = 1 << 32) -> int:
     if cur >= prev:
         return cur - prev
     return (mod - prev) + cur
-
-
-if __name__ == "__main__":
-    import sys
-    target = sys.argv[1] if len(sys.argv) > 1 else None
-    print(f"Discovering IGD (target={target})...")
-    svc = discover_igd(target)
-    print(f"  friendly_name = {svc.friendly_name}")
-    print(f"  service_type  = {svc.service_type}")
-    print(f"  control_url   = {svc.control_url}")
-    s1, r1 = get_throughput_counters(svc)
-    print(f"  sent={s1}  recv={r1}")
-    time.sleep(2)
-    s2, r2 = get_throughput_counters(svc)
-    ds = diff_counter(s1, s2)
-    dr = diff_counter(r1, r2)
-    print(f"  +2s sent={s2}  recv={r2}  ({ds} bytes up, {dr} bytes down in 2s)")
