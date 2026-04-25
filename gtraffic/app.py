@@ -110,22 +110,43 @@ def _nice_bps_ticks(max_val: float, n: int = 5) -> tuple[list[float], list[str]]
     return positions, [_fmt_bps_short(p) for p in positions]
 
 
-def _nice_ms_ticks(max_val: float, n: int = 4) -> tuple[list[float], list[str]]:
-    if max_val <= 0 or not math.isfinite(max_val):
-        positions = [0.0, 10.0]
+def _nice_step(raw: float) -> float:
+    if raw <= 0 or not math.isfinite(raw):
+        return 1.0
+    exp = math.floor(math.log10(raw))
+    base = 10 ** exp
+    for m in (1, 2, 2.5, 5, 10):
+        s = m * base
+        if s >= raw:
+            return s
+    return 10 * base
+
+
+def _nice_ms_axis(
+    p_min: float, p_max: float, n_ticks: int = 4
+) -> tuple[float, float, list[float], list[str]]:
+    """Return (lo, hi, tick_positions, tick_labels) for a ping-ms axis sized so
+    the data is centered with headroom and labeled at nice round values."""
+    if not (math.isfinite(p_min) and math.isfinite(p_max)) or p_max < p_min:
+        lo, hi = 0.0, 20.0
     else:
-        raw_step = max_val / max(1, n)
-        exp = math.floor(math.log10(raw_step)) if raw_step > 0 else 0
-        base = 10 ** exp
-        for m in (1, 2, 2.5, 5, 10):
-            step = m * base
-            if step >= raw_step:
-                break
-        upper = math.ceil(max_val / step) * step
-        count = int(round(upper / step)) + 1
-        positions = [i * step for i in range(count)]
-    labels = [(f"{p:.0f} ms" if p >= 10 else f"{p:.1f} ms") if p > 0 else "0" for p in positions]
-    return positions, labels
+        span = max(p_max - p_min, 1.0)
+        pad = span * 0.20
+        raw_lo = max(0.0, p_min - pad)
+        raw_hi = p_max + pad
+        step = _nice_step(max((raw_hi - raw_lo) / max(1, n_ticks), 1.0))
+        lo = math.floor(raw_lo / step) * step
+        hi = math.ceil(raw_hi / step) * step
+        if hi - lo < step:
+            hi = lo + step
+    step = _nice_step((hi - lo) / max(1, n_ticks))
+    count = int(round((hi - lo) / step)) + 1
+    positions = [lo + i * step for i in range(count)]
+    labels = [
+        (f"{p:.0f} ms" if p >= 10 else f"{p:.1f} ms") if p > 0 else "0 ms"
+        for p in positions
+    ]
+    return lo, hi, positions, labels
 
 
 def _build_service(args: argparse.Namespace) -> IgdService:
@@ -145,7 +166,6 @@ class _SessionState:
     external_ip: Optional[str] = None
     wan_status: Optional[WanStatus] = None
     last_meta_refresh: float = 0.0
-    ping_axis_max: float = 20.0  # sticky max for the overlaid ping line
 
 
 def _refresh_meta(svc: IgdService, state: _SessionState, every: float = 30.0) -> None:
@@ -275,20 +295,13 @@ def _render(
     bps_pos, bps_labels = _nice_bps_ticks(bps_max)
     bps_axis_max = bps_pos[-1] if bps_pos[-1] > 0 else 1000.0
 
-    # Sticky ping axis: grow but never shrink within a session.
-    rtt_observed_max = max(
-        (v for v in rtts if v == v and math.isfinite(v)),
-        default=0.0,
-    )
-    if rtt_observed_max * 1.2 > state.ping_axis_max:
-        state.ping_axis_max = max(20.0, rtt_observed_max * 1.5)
-    ping_axis_max = state.ping_axis_max
-
-    # Overlay ping by mapping [0, ping_axis_max] ms -> [0, bps_axis_max] bps.
-    scaled_rtts = [
-        (v / ping_axis_max) * bps_axis_max if (v == v and math.isfinite(v)) else float("nan")
-        for v in rtts
-    ]
+    # Ping y-axis centered on observed range with headroom, so the line uses
+    # the full chart height instead of being pinned near the bottom.
+    finite_rtts = [v for v in rtts if v == v and math.isfinite(v)]
+    if finite_rtts:
+        ms_lo, ms_hi, ms_ticks, ms_labels = _nice_ms_axis(min(finite_rtts), max(finite_rtts))
+    else:
+        ms_lo, ms_hi, ms_ticks, ms_labels = _nice_ms_axis(0.0, 20.0)
 
     last_down = _last_finite(down)
     last_up = _last_finite(up)
@@ -296,16 +309,22 @@ def _render(
     label_down = f"down {_fmt_bps(last_down)}"
     label_up = f"up   {_fmt_bps(last_up)}"
     rtt_now = _fmt_ms(last_rtt if last_rtt == last_rtt else None)
-    label_ping = f"ping {rtt_now}  (scale 0–{int(ping_axis_max)} ms)"
+    label_ping = f"ping {rtt_now}"
 
     plt.title(_build_title(svc, state))
-    plt.plot(x, list(down), label=label_down, color="green", marker="braille")
-    plt.plot(x, list(up), label=label_up, color="cyan", marker="braille")
-    plt.plot(x, scaled_rtts, label=label_ping, color="magenta", marker="braille")
-    plt.xlabel(f"seconds (now = 0)   target {args.host or _hostname_from_url(svc.control_url)}")
     plt.theme("pro")
-    plt.ylim(0, bps_axis_max)
-    plt.yticks(bps_pos, bps_labels)
+    plt.xlabel(f"seconds (now = 0)   target {args.host or _hostname_from_url(svc.control_url)}")
+
+    # Left axis: throughput in bps.
+    plt.plot(x, list(down), label=label_down, color="green", marker="braille", yside="left")
+    plt.plot(x, list(up), label=label_up, color="cyan", marker="braille", yside="left")
+    plt.ylim(0, bps_axis_max, yside="left")
+    plt.yticks(bps_pos, bps_labels, yside="left")
+
+    # Right axis: ping in ms, independently scaled around the observed range.
+    plt.plot(x, list(rtts), label=label_ping, color="magenta", marker="braille", yside="right")
+    plt.ylim(ms_lo, ms_hi, yside="right")
+    plt.yticks(ms_ticks, ms_labels, yside="right")
 
     plt.show()
 
