@@ -6,15 +6,14 @@ home gateway. Polls a UPnP/IGD router once per second for **upload** and
 **ping RTT** to that gateway, all in your terminal using braille characters.
 
 ```
-gTraffic — Actiontec xDSL Router  |  WAN 199.126.x.x  |  Connected  |  up 75d 2h
-         ┌─────────────────────────────────────────────────────────────┐
- 200Mbps │     ⡠⢄                              ⢀⠔⠁⢇                   │ 8 ms  down  12.4 Mbps  (avg 9.1 Mbps)
-         │    ⡠⠁ ⠈⠢⡀          ⢀⠔⢄          ⢀⠔⠁    ⠘⠤⡀                 │       up   168.0 Mbps  (avg 142.0 Mbps)
-   ...                                                                            ping   5.2 ms    (avg 5.4 ms)
-         │  ⢀⠔⠉⠉⠢⡀                                                    │ 4 ms
-         │ ⢀⠔⠁     ⠈⠢⡀⢀⡠⠤⠤⠤⠔⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠑⠒⠦⠤⢄⣀                         │
-       0 └─────────────────────────────────────────────────────────────┘
-                       seconds (now = 0)   target 192.168.1.1
+gTraffic — Actiontec xDSL Router | WAN 1.2.3.4 | Connected | up 75d 2h
+         ┌────────────────────────────┐        down  12.4 Mbps (avg 9.1)
+ 200Mbps ┤    ⡠⢄       ⢀⠔⠁⢇           ├ 8 ms  up   168.0 Mbps (avg 142)
+         │   ⡠⠁⠈⢄   ⢀⠔⢄⡠⠁  ⠘⡀         │       ping   5.2 ms   (avg 5.4)
+ 100Mbps ┤ ⢀⠔  ⠈⠉             ⠈⠢⡀     ├ 4 ms
+         │⠊                       ⠈⠒⢄ │
+       0 └────────────────────────────┘
+            seconds (now=0)  target 192.168.1.1
 ```
 
 Throughput (down + up) reads on the **left** y-axis in auto-scaled
