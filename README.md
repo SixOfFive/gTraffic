@@ -6,18 +6,22 @@ home gateway. Polls a UPnP/IGD router once per second for **upload** and
 **ping RTT** to that gateway, all in your terminal using braille characters.
 
 ```
-gTraffic — Actiontec xDSL Router
-        ┌──────────────────────────────────────────────────────────────┐
- 50Mbps │       ⡠⢄                              ⢀⠔⠁⢇                  │ down  12.4 Mbps
-        │      ⡠⠁ ⠈⠢⡀          ⢀⠔⢄          ⢀⠔⠁    ⠘⠤⡀                │ up    188.0 Mbps
-   ...
-        └──────────────────────────────────────────────────────────────┘
-        ┌──────────────────────────────────────────────────────────────┐
-   8 ms │     ⢀⠔⠉⠉⠢⡀                                                   │ ping   5.0 ms
-        │  ⢀⠔⠁     ⠈⠢⡀⢀⡠⠤⠤⠤⠔⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠑⠒⠦⠤⢄⣀                          │
-   ...
-        └──────────────────────────────────────────────────────────────┘
+gTraffic — Actiontec xDSL Router  |  WAN 199.126.x.x  |  Connected  |  up 75d 2h
+         ┌─────────────────────────────────────────────────────────────┐
+ 200Mbps │     ⡠⢄                              ⢀⠔⠁⢇                   │ 8 ms  down  12.4 Mbps  (avg 9.1 Mbps)
+         │    ⡠⠁ ⠈⠢⡀          ⢀⠔⢄          ⢀⠔⠁    ⠘⠤⡀                 │       up   168.0 Mbps  (avg 142.0 Mbps)
+   ...                                                                            ping   5.2 ms    (avg 5.4 ms)
+         │  ⢀⠔⠉⠉⠢⡀                                                    │ 4 ms
+         │ ⢀⠔⠁     ⠈⠢⡀⢀⡠⠤⠤⠤⠔⠒⠒⠊⠉⠉⠉⠉⠉⠉⠉⠑⠒⠦⠤⢄⣀                         │
+       0 └─────────────────────────────────────────────────────────────┘
+                       seconds (now = 0)   target 192.168.1.1
 ```
+
+Throughput (down + up) reads on the **left** y-axis in auto-scaled
+bps/Kbps/Mbps/Gbps; ping RTT reads on a **right** y-axis in ms, sized to
+its own observed range so the line uses the full chart height. Each
+legend entry shows the current value plus a rolling average over the
+visible window.
 
 ## How it works
 
@@ -26,15 +30,17 @@ gTraffic — Actiontec xDSL Router
   `WANCommonInterfaceConfig:1` service. Counters are uint32 (octets), so
   wrap-around at 4 GiB is handled.
 * **Ping** — wraps the system `ping` binary, so no admin/root needed.
-  Overlaid on the same chart as throughput, with its own ms scale shown in
-  the legend.
+  Plotted on the same chart as throughput on a separate right-side y-axis
+  in ms, sized to its own observed range with headroom.
 * **WAN status** — best-effort `GetStatusInfo` and `GetExternalIPAddress`
   on the `WANIPConnection:1` / `WANPPPConnection:1` service for a header
   showing public IP, link state, and connection uptime. Refreshed every 30s
   by default. If the router doesn't expose them, the header just shows what
   it could find — the app keeps running.
 * **Render** — [`plotext`](https://github.com/piccolomo/plotext) with braille
-  markers, redrawn once per sample.
+  markers, dual y-axes, redrawn once per sample. Each legend entry shows
+  the latest value plus a rolling average over the visible window
+  (`--history` samples).
 
 ## Requirements
 
