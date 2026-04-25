@@ -47,6 +47,68 @@ def _fmt_ms(ms: Optional[float]) -> str:
     return f"{ms:5.1f} ms"
 
 
+_BPS_UNITS = (
+    ("Tbps", 1e12),
+    ("Gbps", 1e9),
+    ("Mbps", 1e6),
+    ("Kbps", 1e3),
+    ("bps", 1.0),
+)
+
+
+def _fmt_bps_short(bps: float) -> str:
+    """Compact y-tick label, e.g. '0', '50 Mbps', '1.2 Gbps'."""
+    if bps == 0:
+        return "0"
+    if not math.isfinite(bps) or bps < 0:
+        return ""
+    for unit, scale in _BPS_UNITS:
+        if bps >= scale:
+            v = bps / scale
+            if v >= 100:
+                return f"{v:.0f} {unit}"
+            if v >= 10:
+                return f"{v:.1f} {unit}"
+            return f"{v:.2f} {unit}"
+    return f"{bps:.0f} bps"
+
+
+def _nice_bps_ticks(max_val: float, n: int = 5) -> tuple[list[float], list[str]]:
+    """Pick ~n nice round tick positions in [0, max_val] and label them."""
+    if max_val <= 0 or not math.isfinite(max_val):
+        positions = [0.0, 1000.0]
+    else:
+        raw_step = max_val / max(1, n)
+        exp = math.floor(math.log10(raw_step)) if raw_step > 0 else 0
+        base = 10 ** exp
+        for m in (1, 2, 2.5, 5, 10):
+            step = m * base
+            if step >= raw_step:
+                break
+        upper = math.ceil(max_val / step) * step
+        count = int(round(upper / step)) + 1
+        positions = [i * step for i in range(count)]
+    return positions, [_fmt_bps_short(p) for p in positions]
+
+
+def _nice_ms_ticks(max_val: float, n: int = 4) -> tuple[list[float], list[str]]:
+    if max_val <= 0 or not math.isfinite(max_val):
+        positions = [0.0, 10.0]
+    else:
+        raw_step = max_val / max(1, n)
+        exp = math.floor(math.log10(raw_step)) if raw_step > 0 else 0
+        base = 10 ** exp
+        for m in (1, 2, 2.5, 5, 10):
+            step = m * base
+            if step >= raw_step:
+                break
+        upper = math.ceil(max_val / step) * step
+        count = int(round(upper / step)) + 1
+        positions = [i * step for i in range(count)]
+    labels = [(f"{p:.0f} ms" if p >= 10 else f"{p:.1f} ms") if p > 0 else "0" for p in positions]
+    return positions, labels
+
+
 def _build_service(args: argparse.Namespace) -> IgdService:
     if args.description_url:
         return from_description_url(args.description_url)
@@ -141,19 +203,31 @@ def _render(
     plt.title(f"gTraffic — {svc.friendly_name or svc.location}")
     plt.plot(x, list(down), label=label_down, color="green", marker="braille")
     plt.plot(x, list(up), label=label_up, color="cyan", marker="braille")
-    plt.ylabel("throughput")
     plt.xlabel("seconds (now = 0)")
-    plt.ylim(lower=0)
     plt.theme("pro")
+
+    bps_max = max(
+        (v for v in list(up) + list(down) if v == v and math.isfinite(v)),
+        default=0.0,
+    )
+    bps_pos, bps_labels = _nice_bps_ticks(bps_max)
+    plt.ylim(0, bps_pos[-1])
+    plt.yticks(bps_pos, bps_labels)
 
     last_rtt = _last_finite(rtts)
     rtt_label = f"ping {_fmt_ms(last_rtt if last_rtt == last_rtt else None)}"
     plt.subplot(2, 1)
     plt.plot(x, list(rtts), label=rtt_label, color="magenta", marker="braille")
-    plt.ylabel("ms")
     plt.xlabel(f"target {args.host or _hostname_from_url(svc.control_url)}")
-    plt.ylim(lower=0)
     plt.theme("pro")
+
+    ms_max = max(
+        (v for v in rtts if v == v and math.isfinite(v)),
+        default=0.0,
+    )
+    ms_pos, ms_labels = _nice_ms_ticks(ms_max)
+    plt.ylim(0, ms_pos[-1])
+    plt.yticks(ms_pos, ms_labels)
 
     plt.show()
 
