@@ -203,6 +203,8 @@ def run(args: argparse.Namespace) -> int:
                 dt = max(1e-3, now - prev_t)
                 up = diff_counter(prev_sent, cur_sent) * 8 / dt
                 down = diff_counter(prev_recv, cur_recv) * 8 / dt
+                if args.swap_up_down:
+                    up, down = down, up
                 prev_sent, prev_recv, prev_t = cur_sent, cur_recv, now
             except Exception:
                 up = float("nan")
@@ -386,6 +388,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         type=float,
         default=30.0,
         help="How often (seconds) to refresh WAN status / external IP (default: 30).",
+    )
+    p.add_argument(
+        "--swap-up-down",
+        action="store_true",
+        help="Swap upload/download labels. Use if your router reports the "
+             "GetTotalBytesSent / GetTotalBytesReceived counters reversed.",
     )
     args = p.parse_args(argv)
 

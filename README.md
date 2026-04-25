@@ -131,6 +131,7 @@ python -m gtraffic 192.168.1.1 --interval 0.5 --history 240
 | `--ping-timeout MS` | `1000` | Per-ping timeout in milliseconds. |
 | `--discover-timeout SECS` | `3.0` | SSDP discovery timeout per attempt. |
 | `--meta-interval SECS` | `30.0` | How often to refresh WAN status / external IP. |
+| `--swap-up-down` | off | Swap upload/download. Use if your router reports `GetTotalBytesSent` / `GetTotalBytesReceived` reversed. |
 
 ## Troubleshooting
 
@@ -143,6 +144,10 @@ python -m gtraffic 192.168.1.1 --interval 0.5 --history 240
   support. Use Windows Terminal, iTerm2, kitty, alacritty, etc.
 * **Counters look stuck** — some routers update their counters slowly (every
   several seconds). Try `--interval 5`.
+* **Up and down look swapped** — most routers follow the IGD spec
+  (`GetTotalBytesSent` = WAN egress = upload). A handful report them
+  reversed. Quick sanity check: trigger a known download and watch which
+  line moves; if it's the wrong one, pass `--swap-up-down`.
 
 ## License
 
