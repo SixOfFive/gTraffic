@@ -33,12 +33,19 @@ DiscoveryMethod = str  # "multicast" | "unicast" | "auto"
 
 
 @dataclass
+class _Endpoint:
+    control_url: str
+    service_type: str
+
+
+@dataclass
 class IgdService:
     location: str         # URL of the device description we discovered
     base_url: str         # base URL for resolving relative controlURLs
-    control_url: str
-    service_type: str
+    control_url: str      # WANCommonInterfaceConfig:1 control URL (back-compat)
+    service_type: str     # WANCommonInterfaceConfig:1 service type
     friendly_name: str = ""
+    wan_connection: Optional[_Endpoint] = None  # WANIPConnection or WANPPPConnection
 
 
 def list_local_ipv4() -> list[str]:
@@ -204,41 +211,57 @@ def _parse_device_description(location: str) -> IgdService:
     url_base = root.findtext("d:URLBase", default="", namespaces=ns).strip() or location
     friendly = root.findtext(".//d:friendlyName", default="", namespaces=ns)
 
+    common_iface: Optional[_Endpoint] = None
+    wan_conn: Optional[_Endpoint] = None
+
     for svc in root.iter(f"{{{DEVICE_NS}}}service"):
         st = (svc.findtext("d:serviceType", default="", namespaces=ns) or "").strip()
-        if "WANCommonInterfaceConfig" in st:
-            ctrl = (svc.findtext("d:controlURL", default="", namespaces=ns) or "").strip()
-            full = urllib.parse.urljoin(url_base, ctrl)
-            return IgdService(
-                location=location,
-                base_url=url_base,
-                control_url=full,
-                service_type=st,
-                friendly_name=friendly,
-            )
-    raise RuntimeError("WANCommonInterfaceConfig service not found in device description")
+        ctrl = (svc.findtext("d:controlURL", default="", namespaces=ns) or "").strip()
+        if not ctrl:
+            continue
+        full = urllib.parse.urljoin(url_base, ctrl)
+        if "WANCommonInterfaceConfig" in st and common_iface is None:
+            common_iface = _Endpoint(full, st)
+        elif ("WANIPConnection" in st or "WANPPPConnection" in st) and wan_conn is None:
+            wan_conn = _Endpoint(full, st)
+
+    if not common_iface:
+        raise RuntimeError("WANCommonInterfaceConfig service not found in device description")
+
+    return IgdService(
+        location=location,
+        base_url=url_base,
+        control_url=common_iface.control_url,
+        service_type=common_iface.service_type,
+        friendly_name=friendly,
+        wan_connection=wan_conn,
+    )
 
 
-def _soap_call(svc: IgdService, action: str) -> str:
+def _soap_call_endpoint(ep: _Endpoint, action: str) -> str:
     body = (
         '<?xml version="1.0"?>'
         '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
         's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
         "<s:Body>"
-        f'<u:{action} xmlns:u="{svc.service_type}"></u:{action}>'
+        f'<u:{action} xmlns:u="{ep.service_type}"></u:{action}>'
         "</s:Body></s:Envelope>"
     ).encode("utf-8")
     req = urllib.request.Request(
-        svc.control_url,
+        ep.control_url,
         data=body,
         headers={
             "Content-Type": 'text/xml; charset="utf-8"',
-            "SOAPAction": f'"{svc.service_type}#{action}"',
+            "SOAPAction": f'"{ep.service_type}#{action}"',
         },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=2) as resp:
         return resp.read().decode("utf-8", errors="replace")
+
+
+def _soap_call(svc: IgdService, action: str) -> str:
+    return _soap_call_endpoint(_Endpoint(svc.control_url, svc.service_type), action)
 
 
 def get_throughput_counters(svc: IgdService) -> tuple[int, int]:
@@ -250,6 +273,39 @@ def get_throughput_counters(svc: IgdService) -> tuple[int, int]:
     if not sent_m or not recv_m:
         raise RuntimeError("Unexpected SOAP response from IGD")
     return int(sent_m.group(1)), int(recv_m.group(1))
+
+
+@dataclass
+class WanStatus:
+    connection_status: str  # "Connected", "Disconnected", "Connecting", ...
+    last_error: str         # "ERROR_NONE" when healthy
+    uptime_seconds: int     # seconds connection has been up
+
+
+def get_wan_status(svc: IgdService) -> Optional[WanStatus]:
+    """Call GetStatusInfo on the WAN*Connection service. None if unavailable."""
+    if not svc.wan_connection:
+        return None
+    xml = _soap_call_endpoint(svc.wan_connection, "GetStatusInfo")
+    cs = re.search(r"<NewConnectionStatus>([^<]*)</NewConnectionStatus>", xml)
+    le = re.search(r"<NewLastConnectionError>([^<]*)</NewLastConnectionError>", xml)
+    ut = re.search(r"<NewUptime>(\d+)</NewUptime>", xml)
+    if not cs:
+        return None
+    return WanStatus(
+        connection_status=cs.group(1).strip(),
+        last_error=(le.group(1).strip() if le else ""),
+        uptime_seconds=int(ut.group(1)) if ut else 0,
+    )
+
+
+def get_external_ip(svc: IgdService) -> Optional[str]:
+    """Call GetExternalIPAddress on the WAN*Connection service. None if unavailable."""
+    if not svc.wan_connection:
+        return None
+    xml = _soap_call_endpoint(svc.wan_connection, "GetExternalIPAddress")
+    m = re.search(r"<NewExternalIPAddress>([^<]*)</NewExternalIPAddress>", xml)
+    return m.group(1).strip() if m and m.group(1).strip() else None
 
 
 def diff_counter(prev: int, cur: int, mod: int = 1 << 32) -> int:

@@ -26,6 +26,13 @@ gTraffic — Actiontec xDSL Router
   `WANCommonInterfaceConfig:1` service. Counters are uint32 (octets), so
   wrap-around at 4 GiB is handled.
 * **Ping** — wraps the system `ping` binary, so no admin/root needed.
+  Overlaid on the same chart as throughput, with its own ms scale shown in
+  the legend.
+* **WAN status** — best-effort `GetStatusInfo` and `GetExternalIPAddress`
+  on the `WANIPConnection:1` / `WANPPPConnection:1` service for a header
+  showing public IP, link state, and connection uptime. Refreshed every 30s
+  by default. If the router doesn't expose them, the header just shows what
+  it could find — the app keeps running.
 * **Render** — [`plotext`](https://github.com/piccolomo/plotext) with braille
   markers, redrawn once per sample.
 
@@ -123,6 +130,7 @@ python -m gtraffic 192.168.1.1 --interval 0.5 --history 240
 | `--history N` | `120` | Number of samples to keep on the graph. |
 | `--ping-timeout MS` | `1000` | Per-ping timeout in milliseconds. |
 | `--discover-timeout SECS` | `3.0` | SSDP discovery timeout per attempt. |
+| `--meta-interval SECS` | `30.0` | How often to refresh WAN status / external IP. |
 
 ## Troubleshooting
 

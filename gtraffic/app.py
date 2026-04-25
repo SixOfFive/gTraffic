@@ -6,6 +6,7 @@ import math
 import sys
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Deque, Optional
 
 # plotext draws braille / box-drawing characters that need a UTF-8 stdout.
@@ -22,9 +23,12 @@ import plotext as plt
 from .ping import ping_once
 from .upnp import (
     IgdService,
+    WanStatus,
     diff_counter,
     discover_igd,
     from_description_url,
+    get_external_ip,
+    get_wan_status,
     list_local_ipv4,
 )
 
@@ -45,6 +49,21 @@ def _fmt_ms(ms: Optional[float]) -> str:
     if ms is None:
         return "   --  "
     return f"{ms:5.1f} ms"
+
+
+def _fmt_uptime(seconds: int) -> str:
+    if seconds < 0:
+        return "?"
+    d, rem = divmod(int(seconds), 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
 
 
 _BPS_UNITS = (
@@ -121,6 +140,31 @@ def _build_service(args: argparse.Namespace) -> IgdService:
     )
 
 
+@dataclass
+class _SessionState:
+    external_ip: Optional[str] = None
+    wan_status: Optional[WanStatus] = None
+    last_meta_refresh: float = 0.0
+    ping_axis_max: float = 20.0  # sticky max for the overlaid ping line
+
+
+def _refresh_meta(svc: IgdService, state: _SessionState, every: float = 30.0) -> None:
+    now = time.time()
+    if now - state.last_meta_refresh < every:
+        return
+    state.last_meta_refresh = now
+    try:
+        state.external_ip = get_external_ip(svc) or state.external_ip
+    except Exception:
+        pass
+    try:
+        s = get_wan_status(svc)
+        if s is not None:
+            state.wan_status = s
+    except Exception:
+        pass
+
+
 def run(args: argparse.Namespace) -> int:
     print(f"gTraffic — discovering IGD ({args.host or 'broadcast'})...", flush=True)
     try:
@@ -129,6 +173,10 @@ def run(args: argparse.Namespace) -> int:
         print(f"discovery failed: {e}", file=sys.stderr)
         return 2
     print(f"  {svc.friendly_name}  ->  {svc.control_url}", flush=True)
+    if svc.wan_connection:
+        print(f"  WAN connection service: {svc.wan_connection.service_type}", flush=True)
+    else:
+        print("  (no WAN*Connection service — external IP / uptime will be hidden)", flush=True)
     time.sleep(0.5)
 
     history = args.history
@@ -140,6 +188,9 @@ def run(args: argparse.Namespace) -> int:
 
     prev_sent, prev_recv = get_throughput_counters(svc)
     prev_t = time.time()
+
+    state = _SessionState()
+    _refresh_meta(svc, state, every=0.0)  # force first fetch
 
     ping_target = args.host or _hostname_from_url(svc.control_url)
 
@@ -163,7 +214,12 @@ def run(args: argparse.Namespace) -> int:
             down_bps.append(down)
             rtts.append(rtt if rtt is not None else float("nan"))
 
-            _render(args, svc, up_bps, down_bps, rtts)
+            _refresh_meta(svc, state, every=args.meta_interval)
+            # Bump uptime by elapsed wall time so it ticks live between refreshes
+            if state.wan_status:
+                state.wan_status.uptime_seconds += int(args.interval)
+
+            _render(args, svc, state, up_bps, down_bps, rtts)
 
             elapsed = time.time() - tick_start
             time.sleep(max(0.0, args.interval - elapsed))
@@ -184,50 +240,70 @@ def _last_finite(seq: Deque[float]) -> float:
     return float("nan")
 
 
+def _build_title(svc: IgdService, state: _SessionState) -> str:
+    parts = [f"gTraffic — {svc.friendly_name or svc.location}"]
+    if state.external_ip:
+        parts.append(f"WAN {state.external_ip}")
+    if state.wan_status:
+        s = state.wan_status
+        parts.append(s.connection_status)
+        parts.append(f"up {_fmt_uptime(s.uptime_seconds)}")
+        if s.last_error and s.last_error != "ERROR_NONE":
+            parts.append(f"err {s.last_error}")
+    return "  |  ".join(parts)
+
+
 def _render(
     args: argparse.Namespace,
     svc: IgdService,
+    state: _SessionState,
     up: Deque[float],
     down: Deque[float],
     rtts: Deque[float],
 ) -> None:
-    plt.clt()  # clear terminal
-    plt.clf()  # clear figure
-    plt.subplots(2, 1)
+    plt.clt()
+    plt.clf()
 
     x = list(range(-len(up) + 1, 1))  # negative seconds = age
-    label_down = f"down {_fmt_bps(_last_finite(down))}"
-    label_up = f"up   {_fmt_bps(_last_finite(up))}"
-
-    plt.subplot(1, 1)
-    plt.title(f"gTraffic — {svc.friendly_name or svc.location}")
-    plt.plot(x, list(down), label=label_down, color="green", marker="braille")
-    plt.plot(x, list(up), label=label_up, color="cyan", marker="braille")
-    plt.xlabel("seconds (now = 0)")
-    plt.theme("pro")
 
     bps_max = max(
         (v for v in list(up) + list(down) if v == v and math.isfinite(v)),
         default=0.0,
     )
     bps_pos, bps_labels = _nice_bps_ticks(bps_max)
-    plt.ylim(0, bps_pos[-1])
-    plt.yticks(bps_pos, bps_labels)
+    bps_axis_max = bps_pos[-1] if bps_pos[-1] > 0 else 1000.0
 
-    last_rtt = _last_finite(rtts)
-    rtt_label = f"ping {_fmt_ms(last_rtt if last_rtt == last_rtt else None)}"
-    plt.subplot(2, 1)
-    plt.plot(x, list(rtts), label=rtt_label, color="magenta", marker="braille")
-    plt.xlabel(f"target {args.host or _hostname_from_url(svc.control_url)}")
-    plt.theme("pro")
-
-    ms_max = max(
+    # Sticky ping axis: grow but never shrink within a session.
+    rtt_observed_max = max(
         (v for v in rtts if v == v and math.isfinite(v)),
         default=0.0,
     )
-    ms_pos, ms_labels = _nice_ms_ticks(ms_max)
-    plt.ylim(0, ms_pos[-1])
-    plt.yticks(ms_pos, ms_labels)
+    if rtt_observed_max * 1.2 > state.ping_axis_max:
+        state.ping_axis_max = max(20.0, rtt_observed_max * 1.5)
+    ping_axis_max = state.ping_axis_max
+
+    # Overlay ping by mapping [0, ping_axis_max] ms -> [0, bps_axis_max] bps.
+    scaled_rtts = [
+        (v / ping_axis_max) * bps_axis_max if (v == v and math.isfinite(v)) else float("nan")
+        for v in rtts
+    ]
+
+    last_down = _last_finite(down)
+    last_up = _last_finite(up)
+    last_rtt = _last_finite(rtts)
+    label_down = f"down {_fmt_bps(last_down)}"
+    label_up = f"up   {_fmt_bps(last_up)}"
+    rtt_now = _fmt_ms(last_rtt if last_rtt == last_rtt else None)
+    label_ping = f"ping {rtt_now}  (scale 0–{int(ping_axis_max)} ms)"
+
+    plt.title(_build_title(svc, state))
+    plt.plot(x, list(down), label=label_down, color="green", marker="braille")
+    plt.plot(x, list(up), label=label_up, color="cyan", marker="braille")
+    plt.plot(x, scaled_rtts, label=label_ping, color="magenta", marker="braille")
+    plt.xlabel(f"seconds (now = 0)   target {args.host or _hostname_from_url(svc.control_url)}")
+    plt.theme("pro")
+    plt.ylim(0, bps_axis_max)
+    plt.yticks(bps_pos, bps_labels)
 
     plt.show()
 
@@ -304,6 +380,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         type=float,
         default=3.0,
         help="SSDP discovery timeout in seconds (default: 3.0).",
+    )
+    p.add_argument(
+        "--meta-interval",
+        type=float,
+        default=30.0,
+        help="How often (seconds) to refresh WAN status / external IP (default: 30).",
     )
     args = p.parse_args(argv)
 
