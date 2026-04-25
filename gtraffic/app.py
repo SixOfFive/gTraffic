@@ -262,6 +262,11 @@ def _last_finite(seq: Deque[float]) -> float:
     return float("nan")
 
 
+def _avg_finite(seq: Deque[float]) -> float:
+    vals = [v for v in seq if v == v and math.isfinite(v)]
+    return sum(vals) / len(vals) if vals else float("nan")
+
+
 def _build_title(svc: IgdService, state: _SessionState) -> str:
     parts = [f"gTraffic — {svc.friendly_name or svc.location}"]
     if state.external_ip:
@@ -306,10 +311,14 @@ def _render(
     last_down = _last_finite(down)
     last_up = _last_finite(up)
     last_rtt = _last_finite(rtts)
-    label_down = f"down {_fmt_bps(last_down)}"
-    label_up = f"up   {_fmt_bps(last_up)}"
+    avg_down = _avg_finite(down)
+    avg_up = _avg_finite(up)
+    avg_rtt = _avg_finite(rtts)
+    label_down = f"down {_fmt_bps(last_down)}  (avg {_fmt_bps(avg_down)})"
+    label_up = f"up   {_fmt_bps(last_up)}  (avg {_fmt_bps(avg_up)})"
     rtt_now = _fmt_ms(last_rtt if last_rtt == last_rtt else None)
-    label_ping = f"ping {rtt_now}"
+    rtt_avg = _fmt_ms(avg_rtt if avg_rtt == avg_rtt else None)
+    label_ping = f"ping {rtt_now}  (avg {rtt_avg})"
 
     plt.title(_build_title(svc, state))
     plt.theme("pro")
