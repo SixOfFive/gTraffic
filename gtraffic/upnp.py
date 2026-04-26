@@ -8,8 +8,10 @@ to locate the WANCommonInterfaceConfig:1 service, which exposes:
 """
 from __future__ import annotations
 
+import http.client
 import re
 import socket
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -238,6 +240,30 @@ def _parse_device_description(location: str) -> IgdService:
     )
 
 
+_conn_cache: dict[tuple[str, int], http.client.HTTPConnection] = {}
+_conn_lock = threading.Lock()
+
+
+def _get_conn(host: str, port: int) -> http.client.HTTPConnection:
+    key = (host, port)
+    with _conn_lock:
+        conn = _conn_cache.get(key)
+        if conn is None:
+            conn = http.client.HTTPConnection(host, port, timeout=3)
+            _conn_cache[key] = conn
+        return conn
+
+
+def _drop_conn(host: str, port: int) -> None:
+    with _conn_lock:
+        conn = _conn_cache.pop((host, port), None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _soap_call_endpoint(ep: _Endpoint, action: str) -> str:
     body = (
         '<?xml version="1.0"?>'
@@ -247,17 +273,31 @@ def _soap_call_endpoint(ep: _Endpoint, action: str) -> str:
         f'<u:{action} xmlns:u="{ep.service_type}"></u:{action}>'
         "</s:Body></s:Envelope>"
     ).encode("utf-8")
-    req = urllib.request.Request(
-        ep.control_url,
-        data=body,
-        headers={
-            "Content-Type": 'text/xml; charset="utf-8"',
-            "SOAPAction": f'"{ep.service_type}#{action}"',
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=2) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    headers = {
+        "Content-Type": 'text/xml; charset="utf-8"',
+        "SOAPAction": f'"{ep.service_type}#{action}"',
+        "Connection": "keep-alive",
+    }
+    parsed = urllib.parse.urlparse(ep.control_url)
+    host = parsed.hostname or ""
+    port = parsed.port or 80
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+
+    last_err: Optional[Exception] = None
+    for attempt in range(2):
+        conn = _get_conn(host, port)
+        try:
+            conn.request("POST", path, body, headers)
+            resp = conn.getresponse()
+            data = resp.read()  # must fully drain before next request on this conn
+            return data.decode("utf-8", errors="replace")
+        except (http.client.HTTPException, ConnectionError, OSError, TimeoutError) as e:
+            last_err = e
+            _drop_conn(host, port)
+            continue
+    raise RuntimeError(f"SOAP call {action} failed: {last_err}")
 
 
 def _soap_call(svc: IgdService, action: str) -> str:

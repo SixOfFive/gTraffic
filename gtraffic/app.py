@@ -20,7 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import plotext as plt
 
-from .ping import ping_once
+from .ping import ContinuousPing
 from .upnp import (
     IgdService,
     WanStatus,
@@ -213,6 +213,10 @@ def run(args: argparse.Namespace) -> int:
     _refresh_meta(svc, state, every=0.0)  # force first fetch
 
     ping_target = args.host or _hostname_from_url(svc.control_url)
+    pinger: Optional[ContinuousPing] = None
+    if ping_target:
+        pinger = ContinuousPing(ping_target, interval=args.interval)
+        pinger.start()
 
     try:
         while True:
@@ -230,7 +234,7 @@ def run(args: argparse.Namespace) -> int:
                 up = float("nan")
                 down = float("nan")
 
-            rtt = ping_once(ping_target, timeout_ms=args.ping_timeout) if ping_target else None
+            rtt = pinger.latest(max_age=args.interval * 3) if pinger else None
 
             up_bps.append(up)
             down_bps.append(down)
@@ -248,6 +252,9 @@ def run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print()
         return 0
+    finally:
+        if pinger:
+            pinger.close()
 
 
 def _hostname_from_url(url: str) -> Optional[str]:
