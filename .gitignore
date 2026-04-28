@@ -2,6 +2,7 @@
 .claude/
 .claude.local/
 CLAUDE.local.md
+brainstart.md
 
 # Python
 __pycache__/
